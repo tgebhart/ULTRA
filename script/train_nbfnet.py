@@ -271,9 +271,9 @@ if __name__ == "__main__":
 
     cfg.model['num_relation'] = train_data[0].num_relations[0]
     # model = NBFNet(**cfg.model)
-    # model = NBFNetInv(**cfg.model)
+    model = NBFNetInv(**cfg.model)
     # model = NBFNetEig(**cfg.model)
-    model = NBFNetDirect(**cfg.model)
+    # model = NBFNetDirect(**cfg.model)
 
     if "checkpoint" in cfg:
         state = torch.load(cfg.checkpoint, map_location="cpu")
@@ -282,7 +282,7 @@ if __name__ == "__main__":
     model = model.to(device)
 
     print('inverting...')
-    # model.compute_inverse_laps(train_data[0], normalization='sym', threshold_pctile=0, atol=1e-6)
+    model.compute_inverse_laps(train_data[0], normalization='sym', threshold_pctile=0, atol=1e-6)
     # model.compute_eigs(train_data[0], normalization='sym', k=12, atol=1e-3)
 
     assert task_name == "MultiGraphPretraining", "Only the MultiGraphPretraining task is allowed for this script"
