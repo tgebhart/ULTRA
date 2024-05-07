@@ -1,8 +1,11 @@
 import torch
+from tqdm import tqdm
 from torch import nn
-
+from torch_geometric.utils import get_laplacian, to_dense_adj, add_self_loops, to_scipy_sparse_matrix
+from torch_geometric.utils import add_self_loops, remove_self_loops, scatter
 from . import tasks, layers
 from ultra.base_nbfnet import BaseNBFNet
+from sheaf_theory.model_translator import translate_to_graph_rep_inv, translate_to_graph_rep_eig
 
 class Ultra(nn.Module):
 
@@ -208,7 +211,291 @@ class EntityNBFNet(BaseNBFNet):
         return score.view(shape)
 
     
+class NBFNet(BaseNBFNet):
 
+    def __init__(self, input_dim, hidden_dims, num_relation, message_func="distmult", aggregate_func="sum",
+                 short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
+                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, **kwargs):
+        super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
+                 short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
+                 dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)
+
+        self.layers = nn.ModuleList()
+        self.copy_weights = kwargs.get('copy_weights', False)
+        self.freeze_relation_weights = kwargs.get('freeze_relation_weights', False)
+
+        for i in range(len(self.dims) - 1):
+            if self.copy_weights:
+                print('COPYING WEIGHTS...')
+                if i == 0:
+                    l0 = layers.GeneralizedRelationalConv(self.dims[i], self.dims[i + 1], num_relation,
+                                                                self.dims[0], message_func, aggregate_func, layer_norm,
+                                                                activation, dependent)
+                layer = l0
+            else:
+                layer = layers.GeneralizedRelationalConv(self.dims[i], self.dims[i + 1], num_relation,
+                                                                self.dims[0], message_func, aggregate_func, layer_norm,
+                                                                activation, dependent)
+            if self.freeze_relation_weights:
+                for param in layer.parameters():
+                    param.requires_grad = False    
+            self.layers.append(layer)
+
+        feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
+
+        # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
+        # each layer has its own learnable relations matrix, so we send the total number of relations, too
+        self.query = nn.Embedding(num_relation, input_dim)
+        self.mlp = nn.Sequential()
+        mlp = []
+        for i in range(num_mlp_layer - 1):
+            mlp.append(nn.Linear(feature_dim, feature_dim))
+            mlp.append(nn.ReLU())
+        mlp.append(nn.Linear(feature_dim, 1))
+        self.mlp = nn.Sequential(*mlp)
     
 
+    def forward(self, data, batch):
+        h_index, t_index, r_index = batch.unbind(-1)
+        if self.training:
+            # Edge dropout in the training mode
+            # here we want to remove immediate edges (head, relation, tail) from the edge_index and edge_types
+            # to make NBFNet iteration learn non-trivial paths
+            data = self.remove_easy_edges(data, h_index, t_index, r_index)
 
+        shape = h_index.shape
+        # turn all triples in a batch into a tail prediction mode
+        h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index, num_direct_rel=data.num_relations // 2)
+        assert (h_index[:, [0]] == h_index).all()
+        assert (r_index[:, [0]] == r_index).all()
+
+        # message passing and updated node representations
+        output = self.bellmanford(data, h_index[:, 0], r_index[:, 0])  # (num_nodes, batch_size, feature_dim）
+        feature = output["node_feature"]
+        index = t_index.unsqueeze(-1).expand(-1, -1, feature.shape[-1])
+        # extract representations of tail entities from the updated node states
+        feature = feature.gather(1, index)  # (batch_size, num_negative + 1, feature_dim)
+
+        # probability logit for each tail node in the batch
+        # (batch_size, num_negative + 1, dim) -> (batch_size, num_negative + 1)
+        score = self.mlp(feature).squeeze(-1)
+        return score.view(shape)
+
+
+class NBFNetInv(NBFNet):
+
+    def __init__(self, input_dim, hidden_dims, num_relation, base_model=None, message_func="distmult", aggregate_func="sum",
+                 short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
+                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, **kwargs):
+        super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
+                 short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
+                 dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)        
+
+        feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
+
+        self.Linv = None
+        # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
+        # each layer has its own learnable relations matrix, so we send the total number of relations, too
+        
+        if base_model is not None:
+            self.mlp = base_model.mlp
+            self.query = base_model.query
+        else:
+            if kwargs.get('freeze_relation_weights', False):
+                self.query.requires_grad_(False)
+            self.mlp = nn.Sequential()
+            mlp = []
+            for i in range(num_mlp_layer - 1):
+                mlp.append(nn.Linear(feature_dim, feature_dim))
+                mlp.append(nn.ReLU())
+            mlp.append(nn.Linear(feature_dim, 1))
+            self.mlp = nn.Sequential(*mlp)
+    
+    def compute_inverse_laps(self, data, normalization='sym', base_model=None,
+                             atol=None, threshold_pctile=0, self_loops=True):
+        with torch.no_grad():
+            base_model = base_model if base_model is not None else self
+            self.Linv = translate_to_graph_rep_inv(self, data, normalization=normalization, 
+                                                   atol=atol, threshold_pctile=threshold_pctile,
+                                                   self_loops=self_loops)
+        if not self.freeze_relation_weights:
+            self.Linv.requires_grad = True
+
+    def forward(self, data, batch):
+        h_index, t_index, r_index = batch.unbind(-1)
+        if self.training:
+            # Edge dropout in the training mode
+            # here we want to remove immediate edges (head, relation, tail) from the edge_index and edge_types
+            # to make NBFNet iteration learn non-trivial paths
+            data = self.remove_easy_edges(data, h_index, t_index, r_index)
+
+        shape = h_index.shape
+        # turn all triples in a batch into a tail prediction mode
+        h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index, num_direct_rel=data.num_relations // 2)
+        assert (h_index[:, [0]] == h_index).all()
+        assert (r_index[:, [0]] == r_index).all()
+
+        # message passing and updated node representations
+        feature = torch.index_select(self.Linv, 0, h_index[:,0])
+        query = torch.index_select(self.query.weight, 0, r_index[:,0])
+        query = query.unsqueeze(1).expand((-1, feature.shape[1], -1))
+        
+        feature = torch.cat([feature, query], dim=-1)
+        index = t_index.unsqueeze(-1).expand(-1, -1, feature.shape[-1])
+        # extract representations of tail entities from the updated node states
+        feature = feature.gather(1, index)  # (batch_size, num_negative + 1, feature_dim)
+
+        # probability logit for each tail node in the batch
+        # (batch_size, num_negative + 1, dim) -> (batch_size, num_negative + 1)
+        score = self.mlp(feature).squeeze(-1)
+        return score.view(shape)
+    
+
+class NBFNetEig(NBFNet):
+
+    def __init__(self, input_dim, hidden_dims, num_relation, message_func="distmult", aggregate_func="sum",
+                 short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
+                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, **kwargs):
+        super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
+                 short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
+                 dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)        
+        
+
+        feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
+
+        self.Leig = None
+        # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
+        # each layer has its own learnable relations matrix, so we send the total number of relations, too
+        
+        self.query = nn.Embedding(num_relation, input_dim)
+        if kwargs.get('freeze_relation_weights', False):
+            self.query.requires_grad_(False)
+        self.mlp = nn.Sequential()
+        mlp = []
+        for i in range(num_mlp_layer - 1):
+            mlp.append(nn.Linear(feature_dim, feature_dim))
+            mlp.append(nn.ReLU())
+        mlp.append(nn.Linear(feature_dim, 1))
+        self.mlp = nn.Sequential(*mlp)
+    
+    def compute_eigs(self, data, normalization='sym', base_model=None, self_loops=True, k=32, atol=1e-6):
+        with torch.no_grad():
+            base_model = base_model if base_model is not None else self
+            self.Leig = translate_to_graph_rep_eig(self, data, normalization=normalization, 
+                                                   k=k, self_loops=self_loops, atol=atol)
+        if not self.freeze_relation_weights:
+            self.Leig.requires_grad = True
+
+    def forward(self, data, batch):
+        h_index, t_index, r_index = batch.unbind(-1)
+        if self.training:
+            # Edge dropout in the training mode
+            # here we want to remove immediate edges (head, relation, tail) from the edge_index and edge_types
+            # to make NBFNet iteration learn non-trivial paths
+            data = self.remove_easy_edges(data, h_index, t_index, r_index)
+
+        shape = h_index.shape
+        # turn all triples in a batch into a tail prediction mode
+        h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index, num_direct_rel=data.num_relations // 2)
+        assert (h_index[:, [0]] == h_index).all()
+        assert (r_index[:, [0]] == r_index).all()
+
+        # message passing and updated node representations
+        feature = torch.index_select(self.Leig, 0, h_index[:,0])
+        query = torch.index_select(self.query.weight, 0, r_index[:,0])
+        query = query.unsqueeze(1).expand((-1, feature.shape[1], -1))
+        
+        feature = torch.cat([feature, query], dim=-1)
+        index = t_index.unsqueeze(-1).expand(-1, -1, feature.shape[-1])
+        # extract representations of tail entities from the updated node states
+        feature = feature.gather(1, index)  # (batch_size, num_negative + 1, feature_dim)
+
+        score = self.mlp(feature).squeeze(-1)
+        return score.view(shape)
+
+
+class NBFNetDirect(NBFNet):
+
+    def __init__(self, input_dim, hidden_dims, num_relation, message_func="distmult", aggregate_func="sum",
+                 short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
+                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, **kwargs):
+        super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
+                 short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
+                 dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)        
+        
+
+        feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
+
+        # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
+        # each layer has its own learnable relations matrix, so we send the total number of relations, too
+        
+        self.query = nn.Embedding(num_relation, input_dim)
+        if kwargs.get('freeze_relation_weights', False):
+            self.query.requires_grad_(False)
+        # self.decoder = nn.parameter.Parameter(torch.empty(feature_dim, feature_dim))
+        # nn.init.xavier_normal_(self.decoder)
+        self.mlp = nn.Sequential()
+        mlp = []
+        for i in range(num_mlp_layer - 1):
+            mlp.append(nn.Linear(feature_dim, feature_dim))
+            mlp.append(nn.ReLU())
+        mlp.append(nn.Linear(feature_dim, 1))
+        self.mlp = nn.Sequential(*mlp)
+    
+
+    def forward(self, data, batch):
+        h_index, t_index, r_index = batch.unbind(-1)
+        if self.training:
+            # Edge dropout in the training mode
+            # here we want to remove immediate edges (head, relation, tail) from the edge_index and edge_types
+            # to make NBFNet iteration learn non-trivial paths
+            data = self.remove_easy_edges(data, h_index, t_index, r_index)
+
+        shape = h_index.shape
+        # turn all triples in a batch into a tail prediction mode
+        h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index, num_direct_rel=data.num_relations // 2)
+        assert (h_index[:, [0]] == h_index).all()
+        assert (r_index[:, [0]] == r_index).all()
+        
+        res = []
+        nbf_layers = [self.layers[0]]
+        for layer in nbf_layers:
+            if hasattr(layer, 'relation_linear'):
+                rels = layer.relation_linear(data).weight
+            elif hasattr(layer, 'relation'):
+                rels = layer.relation.weight
+            else:
+                raise ValueError('Cannot find relation representation in layer.')
+
+            # now we're assuming the relation representation is a vector, implying 
+            # the associated sheaf Laplacian is the direct sum of the Laplacian in 
+            # each dimension
+            
+            rels_reshaped = torch.index_select(rels, 0, data.edge_type)
+            L_edge_index, L_edge_weight = get_laplacian(data.edge_index, edge_weight=rels_reshaped, normalization='sym')
+            L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight, max_num_nodes=data.num_nodes)
+            L = L[0].permute(-1, 0, 1)
+            I = torch.eye(data.num_nodes).to(L.device).unsqueeze(0)
+            Linv = L
+            for i in range(2,3):
+                Linv += torch.linalg.matrix_power(I - L, i)
+
+            # eigs, vecs = torch.lobpcg(L.permute(-1, 0, 1), k=3, largest=True, tol=1e-6)
+
+            # TODO: This does not converge
+            # perturbation = torch.randn(*L.shape, device=L.device) * 1e-6  # Small random noise
+            # Linv = torch.linalg.pinv((L+perturbation).permute(-1, 0, 1)).permute(1, 2, 0)
+            
+        # message passing and updated node representations
+        Linv = Linv.permute(1, 2, 0)
+        feature = torch.index_select(Linv, 0, h_index[:,0])
+        query = torch.index_select(self.query.weight, 0, r_index[:,0])
+        query = query.unsqueeze(1).expand((-1, feature.shape[1], -1))
+        
+        feature = torch.cat([feature, query], dim=-1)
+        index = t_index.unsqueeze(-1).expand(-1, -1, feature.shape[-1])
+        # extract representations of tail entities from the updated node states
+        feature = feature.gather(1, index)  # (batch_size, num_negative + 1, feature_dim)
+
+        score = self.mlp(feature).squeeze(-1)
+        return score.view(shape)

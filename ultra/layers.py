@@ -8,6 +8,20 @@ from torch_geometric.utils import degree
 from typing import Tuple
 
 
+class OrthogonalMatrices(nn.Module):
+    def __init__(self, n, m):
+        super().__init__()
+        # Create a 3D tensor where each 'slice' (along the first dimension) is an m x m matrix
+        self.weight = nn.Parameter(torch.rand((n, m, m)))
+
+    def forward(self):
+        # Optionally, perform some operations with these matrices
+        return self.weight
+    
+    def check(self):
+        # Check if the matrices are orthogonal
+        return torch.dist(self.weight @ self.weight.transpose(1, 2), torch.eye(self.weight.size(1)).to(self.weight.device))
+
 class GeneralizedRelationalConv(MessagePassing):
 
     eps = 1e-6
@@ -45,14 +59,27 @@ class GeneralizedRelationalConv(MessagePassing):
             self.linear = nn.Linear(input_dim * 13, output_dim)
         else:
             self.linear = nn.Linear(input_dim * 2, output_dim)
-
-        if dependent:
+        
+        if dependent and self.message_func == "ntn":
+            # obtain relation embeddings as a projection of the query relation
+            self.relation_linear = nn.Linear(query_input_dim, num_relation * input_dim * input_dim)
+        elif dependent:
             # obtain relation embeddings as a projection of the query relation
             self.relation_linear = nn.Linear(query_input_dim, num_relation * input_dim)
         else:
             if not self.project_relations:
-                # relation embeddings as an independent embedding matrix per each layer
-                self.relation = nn.Embedding(num_relation, input_dim)
+                if self.message_func == "ntn":
+                    # obtain relation embeddings as an independent embedding matrix per each layer
+                    self.relation = OrthogonalMatrices(num_relation, input_dim)
+                    # Apply orthogonal parameterization to each matrix slice
+                    self.relation = nn.utils.parametrizations.orthogonal(self.relation)
+                    # self.relation = nn.Parameter(torch.randn(num_relation, input_dim, input_dim))
+                    # nn.init.uniform_(self.relation, a=0, b=1)
+                    # self.relation = nn.utils.parametrizations.orthogonal(self.relation)
+                else:
+                    # relation embeddings as an independent embedding matrix per each layer
+                    self.relation = nn.Embedding(num_relation, input_dim)
+                    nn.init.uniform_(self.relation.weight.data, a=0, b=1)
             else:
                 # will be initialized after the pass over relation graph
                 self.relation = None
@@ -66,13 +93,19 @@ class GeneralizedRelationalConv(MessagePassing):
     def forward(self, input, query, boundary, edge_index, edge_type, size, edge_weight=None):
         batch_size = len(query)
 
-        if self.dependent:
+        if self.dependent and self.message_func == "ntn":
+            # project query embeddings to the same space as relation embeddings
+            relation = self.relation_linear(query).view(batch_size, self.num_relation, self.input_dim * self.input_dim)
+        elif self.dependent:
             # layer-specific relation features as a projection of input "query" (relation) embeddings
             relation = self.relation_linear(query).view(batch_size, self.num_relation, self.input_dim)
         else:
             if not self.project_relations:
-                # layer-specific relation features as a special embedding matrix unique to each layer
-                relation = self.relation.weight.expand(batch_size, -1, -1)
+                if self.message_func == "ntn":
+                    relation = self.relation.weight.expand(batch_size, -1, -1, -1)
+                else:    
+                    # layer-specific relation features as a special embedding matrix unique to each layer
+                    relation = self.relation.weight.expand(batch_size, -1, -1)
             else:
                 # NEW and only change: 
                 # projecting relation features to unique features for this layer, then resizing for the current batch
@@ -87,7 +120,7 @@ class GeneralizedRelationalConv(MessagePassing):
         return output
 
     def propagate(self, edge_index, size=None, **kwargs):
-        if kwargs["edge_weight"].requires_grad or self.message_func == "rotate":
+        if kwargs["edge_weight"].requires_grad or self.message_func in ["rotate","ntn"]:
             # the rspmm cuda kernel only works for TransE and DistMult message functions
             # otherwise we invoke separate message & aggregate functions
             return super(GeneralizedRelationalConv, self).propagate(edge_index, size, **kwargs)
@@ -126,12 +159,21 @@ class GeneralizedRelationalConv(MessagePassing):
         return out
 
     def message(self, input_j, relation, boundary, edge_type):
-        relation_j = relation.index_select(self.node_dim, edge_type)
+        if self.message_func == "ntn" and not self.dependent:
+            relation_j = relation.index_select(self.node_dim-1, edge_type)
+        else:
+            relation_j = relation.index_select(self.node_dim, edge_type)
 
         if self.message_func == "transe":
             message = input_j + relation_j
         elif self.message_func == "distmult":
             message = input_j * relation_j
+        elif self.message_func == "ntn" and self.dependent:
+            message = relation_j.view(-1, edge_type.shape[0], self.input_dim, self.input_dim) @ input_j.unsqueeze(-1)
+            message = message.squeeze(-1)
+        elif self.message_func == "ntn":
+            message = relation_j @ input_j.unsqueeze(-1)
+            message = message.squeeze(-1)
         elif self.message_func == "rotate":
             x_j_re, x_j_im = input_j.chunk(2, dim=-1)
             r_j_re, r_j_im = relation_j.chunk(2, dim=-1)

@@ -32,25 +32,6 @@ class BaseNBFNet(nn.Module):
         self.activation = activation
         self.num_mlp_layers = num_mlp_layer
 
-        # self.layers = nn.ModuleList()
-        # for i in range(len(self.dims) - 1):
-        #     self.layers.append(layers.GeneralizedRelationalConv(self.dims[i], self.dims[i + 1], num_relation,
-        #                                                         self.dims[0], message_func, aggregate_func, layer_norm,
-        #                                                         activation, dependent))
-
-        # feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
-
-        # # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
-        # # each layer has its own learnable relations matrix, so we send the total number of relations, too
-        # self.query = nn.Embedding(num_relation, input_dim)
-        # self.mlp = nn.Sequential()
-        # mlp = []
-        # for i in range(num_mlp_layer - 1):
-        #     mlp.append(nn.Linear(feature_dim, feature_dim))
-        #     mlp.append(nn.ReLU())
-        # mlp.append(nn.Linear(feature_dim, 1))
-        # self.mlp = nn.Sequential(*mlp)
-
     def remove_easy_edges(self, data, h_index, t_index, r_index=None):
         # we remove training edges (we need to predict them at training time) from the edge index
         # think of it as a dynamic edge dropout
