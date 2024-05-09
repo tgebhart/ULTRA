@@ -1,0 +1,41 @@
+output_dir: ~/projects/ULTRA/output
+
+dataset:
+  class: CoDExSmall
+  root: ~/projects/ULTRA/kg-datasets/
+
+model:
+  class: NBFNetEig
+  input_dim: 128
+  num_mlp_layer: 2
+  message_func: distmult
+  aggregate_func: sum
+  activation: no
+  short_cut: no
+  layer_norm: no
+  dependent: no
+  copy_weights: yes
+  freeze_relation_weights: yes
+  normalization: sym
+  k: 16
+  atol: 1.0e-6
+  niter: 8 
+  
+task:
+  name: MultiGraphPretraining
+  num_negative: 512
+  strict_negative: yes
+  adversarial_temperature: 1
+  metric: [mr, mrr, hits@1, hits@3, hits@10]
+
+optimizer:
+  class: AdamW
+  lr: 5.0e-4
+
+train:
+  gpus: [0]
+  batch_size: 128
+  num_epoch: 100
+  log_interval: 800
+  batch_per_epoch: 8000
+  fast_test: 500

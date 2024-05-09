@@ -2,7 +2,6 @@ import torch
 from tqdm import tqdm
 from torch import nn
 from torch_geometric.utils import get_laplacian, to_dense_adj, add_self_loops, to_scipy_sparse_matrix
-from torch_geometric.utils import add_self_loops, remove_self_loops, scatter
 from . import tasks, layers
 from ultra.base_nbfnet import BaseNBFNet
 from sheaf_theory.model_translator import translate_to_graph_rep_inv, translate_to_graph_rep_eig
@@ -286,13 +285,20 @@ class NBFNetInv(NBFNet):
 
     def __init__(self, input_dim, hidden_dims, num_relation, base_model=None, message_func="distmult", aggregate_func="sum",
                  short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
-                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, **kwargs):
+                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, normalization='sym', 
+                  atol=1e-6, threshold_ptile=0, copy_weights=True, **kwargs):
         super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
                  short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
                  dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)        
 
         feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
 
+
+        self.normalization = normalization
+        self.atol = atol
+        self.threshold_ptile = threshold_ptile
+        self.copy_weights = copy_weights
+        self.freeze_relation_weights = False
         self.Linv = None
         # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
         # each layer has its own learnable relations matrix, so we send the total number of relations, too
@@ -303,6 +309,7 @@ class NBFNetInv(NBFNet):
         else:
             if kwargs.get('freeze_relation_weights', False):
                 self.query.requires_grad_(False)
+                self.freeze_relation_weights = True
             self.mlp = nn.Sequential()
             mlp = []
             for i in range(num_mlp_layer - 1):
@@ -310,14 +317,65 @@ class NBFNetInv(NBFNet):
                 mlp.append(nn.ReLU())
             mlp.append(nn.Linear(feature_dim, 1))
             self.mlp = nn.Sequential(*mlp)
+
+    def translate_to_graph_rep_inv(self, data):
+        nbf_layers = self.layers
+        if self.copy_weights:
+            nbf_layers = [nbf_layers[0]]
+        for layer in nbf_layers:
+            if hasattr(layer, 'relation_linear'):
+                rels = layer.relation_linear(data).weight
+            elif hasattr(layer, 'relation'):
+                rels = layer.relation.weight
+            else:
+                raise ValueError('Cannot find relation representation in layer.')
+
+            # now we're assuming the relation representation is a vector, implying 
+            # the associated sheaf Laplacian is the direct sum of the Laplacian in 
+            # each dimension
+            rels_reshaped = torch.index_select(rels, 0, data.edge_type)
+
+            L_edge_index, L_edge_weight = get_laplacian(data.edge_index, edge_weight=rels_reshaped, 
+                                                        normalization=self.normalization)
+            L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight, max_num_nodes=data.num_nodes)
+            L = L[0] # take first (and only) in batch
+            # Linv = L
+            # for i in range(2,100):
+            #     Linv += torch.linalg.matrix_power(I - L, i)[0]
+            # print('computing inverse...')
+
+            res = []
+            for d in tqdm(range(rels_reshaped.shape[1])):
+                Linv = torch.linalg.pinv(L[:,:,d], atol=self.atol)
+                res.append(Linv.unsqueeze(-1).to('cpu')) # store on cpu to save memory
+
+            res = torch.concatenate(res, axis=-1)
+            res = res.to(rels.device)
+            # I = torch.eye(data.num_nodes).to(rels.device)
+            # I = I.unsqueeze(-1)
+            # res = res - I
+
+            if self.threshold_pctile > 0:
+                # Reshape the tensor to collapse the first two dimensions
+                reshaped_tensor = res.view(-1, res.size(-1))
+
+                # Calculate the 95th percentile along the new dimension (0)
+                percentiles = torch.quantile(reshaped_tensor, self.threshold_pctile, dim=0, keepdim=True)
+
+                # Reshape percentiles to enable broadcasting (1, 1, number of channels)
+                percentiles = percentiles.view(1, 1, res.size(-1))
+
+                # Threshold the tensor: values below the 95th percentile are set to zero
+                res = torch.where(res >= percentiles, res, torch.tensor(0.0))
+                # percentiles = torch.quantile(res.to('cpu'), threshold_pctile, dim=None)
+                # res = torch.where(res >= percentiles.to(res.device), res, torch.tensor(0.0))
+
+            return res
+
     
-    def compute_inverse_laps(self, data, normalization='sym', base_model=None,
-                             atol=None, threshold_pctile=0, self_loops=True):
+    def init_lap(self, data):
         with torch.no_grad():
-            base_model = base_model if base_model is not None else self
-            self.Linv = translate_to_graph_rep_inv(self, data, normalization=normalization, 
-                                                   atol=atol, threshold_pctile=threshold_pctile,
-                                                   self_loops=self_loops)
+            self.Linv = self.translate_to_graph_rep_inv(self, data)
         if not self.freeze_relation_weights:
             self.Linv.requires_grad = True
 
@@ -355,7 +413,8 @@ class NBFNetEig(NBFNet):
 
     def __init__(self, input_dim, hidden_dims, num_relation, message_func="distmult", aggregate_func="sum",
                  short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
-                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, **kwargs):
+                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, normalization='sym', 
+                  k=16, atol=1e-6, niter=8, copy_weights=True, **kwargs):
         super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
                  short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
                  dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)        
@@ -363,6 +422,12 @@ class NBFNetEig(NBFNet):
 
         feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
 
+        self.normalization = normalization
+        self.k = k
+        self.atol = atol
+        self.niter = niter
+        self.copy_weights = copy_weights
+        self.freeze_relation_weights = False
         self.Leig = None
         # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
         # each layer has its own learnable relations matrix, so we send the total number of relations, too
@@ -370,6 +435,7 @@ class NBFNetEig(NBFNet):
         self.query = nn.Embedding(num_relation, input_dim)
         if kwargs.get('freeze_relation_weights', False):
             self.query.requires_grad_(False)
+            self.freeze_relation_weights = True
         self.mlp = nn.Sequential()
         mlp = []
         for i in range(num_mlp_layer - 1):
@@ -377,12 +443,55 @@ class NBFNetEig(NBFNet):
             mlp.append(nn.ReLU())
         mlp.append(nn.Linear(feature_dim, 1))
         self.mlp = nn.Sequential(*mlp)
+
+    def translate_to_graph_rep_eig(self, data):
+        nbf_layers = self.layers
+        if self.copy_weights:
+            nbf_layers = [nbf_layers[0]]
+        for layer in nbf_layers:
+            if hasattr(layer, 'relation_linear'):
+                rels = layer.relation_linear(data).weight
+            elif hasattr(layer, 'relation'):
+                rels = layer.relation.weight
+            else:
+                raise ValueError('Cannot find relation representation in layer.')
+
+            # now we're assuming the relation representation is a vector, implying 
+            # the associated sheaf Laplacian is the direct sum of the Laplacian in 
+            # each dimension
+            rels_reshaped = torch.index_select(rels, 0, data.edge_type)
+            I = torch.eye(data.num_nodes).to(rels.device)
+            I = I.unsqueeze(-1).repeat(1,1,rels_reshaped.shape[1])
+
+            L_edge_index, L_edge_weight = get_laplacian(data.edge_index, edge_weight=rels_reshaped, 
+                                                        normalization=self.normalization)
+
+            res = []
+            
+            L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight, max_num_nodes=data.num_nodes)
+            L = L[0].permute(-1, 0, 1) # take first (and only) in batch
+
+            for d in tqdm(range(L.shape[0])):
+
+                eig_vals, eig_vecs = torch.lobpcg(L[d], k=self.k, 
+                                                largest=False, method='ortho',
+                                                tol=self.atol, niter=self.niter)
+
+                eig_vecs = torch.real(eig_vecs)
+                eig_vals = torch.real(eig_vals)
+                
+                eig_vals[eig_vals > self.atol] = 1/eig_vals[eig_vals > self.atol]
+                eig_vals[eig_vals < self.atol] = 0
+                pe = eig_vecs * eig_vals @ eig_vecs.T
+
+                res.append(pe.unsqueeze(-1))
+        res = torch.concatenate(res, axis=-1).to(rels.device)
+
+        return res
     
-    def compute_eigs(self, data, normalization='sym', base_model=None, self_loops=True, k=32, atol=1e-6):
+    def init_lap(self, data):
         with torch.no_grad():
-            base_model = base_model if base_model is not None else self
-            self.Leig = translate_to_graph_rep_eig(self, data, normalization=normalization, 
-                                                   k=k, self_loops=self_loops, atol=atol)
+            self.Leig = self.translate_to_graph_rep_eig(data)
         if not self.freeze_relation_weights:
             self.Leig.requires_grad = True
 

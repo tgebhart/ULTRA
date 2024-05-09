@@ -80,6 +80,7 @@ class GeneralizedRelationalConv(MessagePassing):
                     # relation embeddings as an independent embedding matrix per each layer
                     self.relation = nn.Embedding(num_relation, input_dim)
                     nn.init.uniform_(self.relation.weight.data, a=0, b=1)
+                    # nn.init.ones_(self.relation.weight.data)
             else:
                 # will be initialized after the pass over relation graph
                 self.relation = None

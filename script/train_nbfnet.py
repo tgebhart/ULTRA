@@ -19,6 +19,7 @@ from ultra import tasks, util
 from ultra.models import NBFNet, NBFNetInv, NBFNetEig, NBFNetDirect
 from sheaf_theory.model_translator import translate_to_graph_rep_inv
 
+import wandb
 
 separator = ">" * 30
 line = "-" * 30
@@ -38,7 +39,8 @@ def multigraph_collator(batch, train_graphs):
     return graph, batch
 
 # here we assume that train_data and valid_data are tuples of datasets
-def train_and_validate(cfg, model, train_data, valid_data, filtered_data=None, batch_per_epoch=None):
+def train_and_validate(cfg, model, train_data, valid_data, filtered_data=None, batch_per_epoch=None,
+                       device='cuda', logger=None):
 
     if cfg.train.num_epoch == 0:
         return
@@ -57,9 +59,10 @@ def train_and_validate(cfg, model, train_data, valid_data, filtered_data=None, b
 
     cls = cfg.optimizer.pop("class")
     optimizer = getattr(optim, cls)(model.parameters(), **cfg.optimizer)
-    num_params = sum(p.numel() for p in model.parameters())
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.warning(line)
     logger.warning(f"Number of parameters: {num_params}")
+    wandb.log({'parameters': num_params})
 
     if world_size > 1:
         parallel_model = nn.parallel.DistributedDataParallel(model, device_ids=[device])
@@ -116,6 +119,9 @@ def train_and_validate(cfg, model, train_data, valid_data, filtered_data=None, b
                 logger.warning("Epoch %d end" % epoch)
                 logger.warning(line)
                 logger.warning("average binary cross entropy: %g" % avg_loss)
+                wandb.log({'epoch': epoch,
+                           'train_loss': avg_loss,
+                           })
 
         epoch = min(cfg.train.num_epoch, i + step)
         if rank == 0:
@@ -130,7 +136,7 @@ def train_and_validate(cfg, model, train_data, valid_data, filtered_data=None, b
         if rank == 0:
             logger.warning(separator)
             logger.warning("Evaluate on valid")
-        result = test(cfg, model, valid_data, filtered_data=filtered_data)
+        result = test(cfg, model, valid_data, filtered_data=filtered_data, dataset='valid', logger=logger)
         if result > best_result:
             best_result = result
             best_epoch = epoch
@@ -143,7 +149,7 @@ def train_and_validate(cfg, model, train_data, valid_data, filtered_data=None, b
 
 
 @torch.no_grad()
-def test(cfg, model, test_data, filtered_data=None):
+def test(cfg, model, test_data, filtered_data=None, dataset='test', device='cuda', logger=None):
     world_size = util.get_world_size()
     rank = util.get_rank()
     
@@ -215,6 +221,10 @@ def test(cfg, model, test_data, filtered_data=None):
                     else:
                         score = (all_ranking <= threshold).float().mean()
                 logger.warning("%s: %g" % (metric, score))
+                wandb.log({f'dataset': dataset,
+                           'metric': metric,
+                           f'{metric}': score,
+                           f'{dataset}_{metric}': score})
         mrr = (1 / all_ranking.float()).mean()
 
         all_metrics.append(mrr)
@@ -223,6 +233,34 @@ def test(cfg, model, test_data, filtered_data=None):
 
     avg_metric = sum(all_metrics) / len(all_metrics)
     return avg_metric
+
+def get_model(cfg, device, data):
+    init_lap = False
+    if cfg.model['class'] == 'NBFNet':
+        model = NBFNet(**cfg.model)
+    elif cfg.model['class'] == 'NBFNetInv':
+        cfg['model']['hidden_dims'] = [cfg['model']['input_dim']]
+        model = NBFNetInv(**cfg.model)
+        init_lap = True
+    elif cfg.model['class'] == 'NBFNetEig':
+        cfg['model']['hidden_dims'] = [cfg['model']['input_dim']]
+        model = NBFNetEig(**cfg.model)
+        init_lap = True
+    elif cfg.model['class'] == 'NBFNetDirect':
+        model = NBFNetDirect(**cfg.model)
+    else:
+        raise ValueError(f"Unknown model class: {cfg.model}")
+    
+    if "checkpoint" in cfg:
+        state = torch.load(cfg.checkpoint, map_location="cpu")
+        model.load_state_dict(state["model"])
+
+    model = model.to(device)
+
+    if init_lap:
+        model.init_lap(data)
+
+    return model
 
 
 if __name__ == "__main__":
@@ -237,86 +275,61 @@ if __name__ == "__main__":
         logger.warning("Random seed: %d" % args.seed)
         logger.warning("Config file: %s" % args.config)
         logger.warning(pprint.pformat(cfg))
+
+    with wandb.init(
+        # set the wandb project where this run will be logged
+        project="ultra",
+        # track hyperparameters and run metadata
+        config=cfg
+        ):
     
-    task_name = cfg.task["name"]
-    dataset = util.build_dataset(cfg)
-    device = util.get_device(cfg)
-    
-    train_data, valid_data, test_data = [dataset[0]], [dataset[1]], [dataset[2]]
-    
-    if "fast_test" in cfg.train:
-        num_val_edges = cfg.train.fast_test
-        if util.get_rank() == 0:
-            logger.warning(f"Fast evaluation on {num_val_edges} samples in validation")
-        short_valid = [copy.deepcopy(vd) for vd in valid_data]
-        for graph in short_valid:
-            mask = torch.randperm(graph.target_edge_index.shape[1])[:num_val_edges]
-            graph.target_edge_index = graph.target_edge_index[:, mask]
-            graph.target_edge_type = graph.target_edge_type[mask]
+        task_name = cfg.task["name"]
+        dataset = util.build_dataset(cfg)
+        device = util.get_device(cfg)
         
-        short_valid = [sv.to(device) for sv in short_valid]
+        train_data, valid_data, test_data = [dataset[0]], [dataset[1]], [dataset[2]]
+        
+        if "fast_test" in cfg.train:
+            num_val_edges = cfg.train.fast_test
+            if util.get_rank() == 0:
+                logger.warning(f"Fast evaluation on {num_val_edges} samples in validation")
+            short_valid = [copy.deepcopy(vd) for vd in valid_data]
+            for graph in short_valid:
+                mask = torch.randperm(graph.target_edge_index.shape[1])[:num_val_edges]
+                graph.target_edge_index = graph.target_edge_index[:, mask]
+                graph.target_edge_type = graph.target_edge_type[mask]
+            
+            short_valid = [sv.to(device) for sv in short_valid]
 
-    train_data = [td.to(device) for td in train_data]
-    valid_data = [vd.to(device) for vd in valid_data]
-    test_data = [tst.to(device) for tst in test_data]
+        train_data = [td.to(device) for td in train_data]
+        valid_data = [vd.to(device) for vd in valid_data]
+        test_data = [tst.to(device) for tst in test_data]
 
-    # for transductive setting, use the whole graph for filtered ranking
-    filtered_data = [
-        Data(
-            edge_index=torch.cat([trg.target_edge_index, valg.target_edge_index, testg.target_edge_index], dim=1), 
-            edge_type=torch.cat([trg.target_edge_type, valg.target_edge_type, testg.target_edge_type,]),
-            num_nodes=trg.num_nodes).to(device)
-        for trg, valg, testg in zip(train_data, valid_data, test_data)
-    ]
+        # for transductive setting, use the whole graph for filtered ranking
+        filtered_data = [
+            Data(
+                edge_index=torch.cat([trg.target_edge_index, valg.target_edge_index, testg.target_edge_index], dim=1), 
+                edge_type=torch.cat([trg.target_edge_type, valg.target_edge_type, testg.target_edge_type,]),
+                num_nodes=trg.num_nodes).to(device)
+            for trg, valg, testg in zip(train_data, valid_data, test_data)
+        ]
 
-    cfg.model['num_relation'] = train_data[0].num_relations[0]
-    # model = NBFNet(**cfg.model)
-    model = NBFNetInv(**cfg.model)
-    # model = NBFNetEig(**cfg.model)
-    # model = NBFNetDirect(**cfg.model)
+        cfg.model['num_relation'] = train_data[0].num_relations[0]
+        model = get_model(cfg, device, train_data[0])
 
-    if "checkpoint" in cfg:
-        state = torch.load(cfg.checkpoint, map_location="cpu")
-        model.load_state_dict(state["model"])
+        assert task_name == "MultiGraphPretraining", "Only the MultiGraphPretraining task is allowed for this script"
 
-    model = model.to(device)
+        cfg_copy = copy.deepcopy(cfg)
 
-    print('inverting...')
-    model.compute_inverse_laps(train_data[0], normalization='sym', threshold_pctile=0, atol=1e-6)
-    # model.compute_eigs(train_data[0], normalization='sym', k=12, atol=1e-3)
-
-    assert task_name == "MultiGraphPretraining", "Only the MultiGraphPretraining task is allowed for this script"
-
-    cfg_copy = copy.deepcopy(cfg)
-
-    logger.warning(separator)
-    logger.warning("Evaluate on valid")
-    test(cfg, model, valid_data, filtered_data=filtered_data)
-    train_and_validate(cfg, model, train_data, valid_data if "fast_test" not in cfg.train else short_valid, filtered_data=filtered_data, batch_per_epoch=cfg.train.batch_per_epoch)
-    if util.get_rank() == 0:
         logger.warning(separator)
         logger.warning("Evaluate on valid")
-    test(cfg, model, valid_data, filtered_data=filtered_data)
-    if util.get_rank() == 0:
-        logger.warning(separator)
-        logger.warning("Evaluate on test")
-    test(cfg, model, test_data, filtered_data=filtered_data)
-
-    # cfg_copy.model['base_model'] = model
-    # model = NBFNetInv(**cfg_copy.model)
-    # model = model.to(device)
-    # model.compute_inverse_laps(train_data[0], normalization='sym', threshold_pctile=0, atol=1e-6)
-
-    # logger.warning(separator)
-    # logger.warning("Evaluate on valid")
-    # test(cfg_copy, model, valid_data, filtered_data=filtered_data)
-
-    # train_and_validate(cfg_copy, model, train_data, valid_data if "fast_test" not in cfg_copy.train else short_valid, filtered_data=filtered_data, batch_per_epoch=cfg_copy.train.batch_per_epoch)
-    # if util.get_rank() == 0:
-    #     logger.warning(separator)
-    #     logger.warning("Evaluate on valid")
-    # test(cfg_copy, model, valid_data, filtered_data=filtered_data)
-    # if util.get_rank() == 0:
-    #     logger.warning(separator)
-    #     logger.warning("Evaluate on test")
-    # test(cfg_copy, model, test_data, filtered_data=filtered_data)
+        test(cfg, model, valid_data, filtered_data=filtered_data, device=device)
+        train_and_validate(cfg, model, train_data, valid_data if "fast_test" not in cfg.train else short_valid, filtered_data=filtered_data, batch_per_epoch=cfg.train.batch_per_epoch)
+        if util.get_rank() == 0:
+            logger.warning(separator)
+            logger.warning("Evaluate on valid")
+        test(cfg, model, valid_data, filtered_data=filtered_data, dataset='valid', device=device)
+        if util.get_rank() == 0:
+            logger.warning(separator)
+            logger.warning("Evaluate on test")
+        test(cfg, model, test_data, filtered_data=filtered_data, dataset='test', device=device)

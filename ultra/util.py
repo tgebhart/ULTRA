@@ -10,6 +10,7 @@ import yaml
 import jinja2
 from jinja2 import meta
 import easydict
+import wandb
 
 import torch
 from torch import distributed as dist

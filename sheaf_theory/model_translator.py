@@ -82,8 +82,8 @@ def translate_to_graph_rep_inv(model, data, normalization=None, copy_weights=Tru
 
 
 
-def translate_to_graph_rep_eig(model, data, k=32, normalization=None, copy_weights=True,
-                               self_loops=True, atol=1e-6):
+def translate_to_graph_rep_eig(model, data, k=16, normalization=None, copy_weights=True,
+                               self_loops=True, atol=1e-6, niter=12):
     nbf_layers = model.layers
     if copy_weights:
         nbf_layers = [nbf_layers[0]]
@@ -105,27 +105,47 @@ def translate_to_graph_rep_eig(model, data, k=32, normalization=None, copy_weigh
         L_edge_index, L_edge_weight = get_laplacian(data.edge_index, edge_weight=rels_reshaped, normalization=normalization)
 
         res = []
-        for d in range(rels_reshaped.shape[1]): 
+        # for d in tqdm(range(rels_reshaped.shape[1])): 
             
-            Ld = to_scipy_sparse_matrix(L_edge_index, edge_attr=L_edge_weight[:, d], num_nodes=data.num_nodes)
-            eig_fn = eigs # if not self.is_undirected else eigsh
+        #     Ld = to_scipy_sparse_matrix(L_edge_index, edge_attr=L_edge_weight[:, d], num_nodes=data.num_nodes)
+        #     eig_fn = eigs # if not self.is_undirected else eigsh
 
-            eig_vals, eig_vecs = eig_fn(  # type: ignore
-                Ld,
-                k=k,
-                which='SR',
-                return_eigenvectors=True,
-            )
-            eig_sort = eig_vals.argsort()[::-1]
-            eig_vecs = np.real(eig_vecs[:, eig_sort])
+        #     eig_vals, eig_vecs = eig_fn(  # type: ignore
+        #         Ld,
+        #         k=k,
+        #         which='SR',
+        #         return_eigenvectors=True,
+        #     )
+        #     # eig_sort = eig_vals.argsort()[::-1]
+        #     eig_sort = eig_vals.argsort()
+        #     eig_vecs = np.real(eig_vecs[:, eig_sort])
             
-            eig_vals = torch.from_numpy(np.real(eig_vals[eig_sort]))
+        #     eig_vals = torch.from_numpy(np.real(eig_vals[eig_sort]))
+        #     eig_vals[eig_vals > atol] = 1/eig_vals[eig_vals > atol]
+        #     eig_vals[eig_vals < atol] = 0
+        #     pe  = torch.from_numpy(eig_vecs[:, :k])
+        #     pe = pe * eig_vals @ pe.T
+
+        #     res.append(pe.unsqueeze(-1))
+        # res = torch.concatenate(res, axis=-1).to(rels.device)
+
+        
+            
+        L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight, max_num_nodes=data.num_nodes)
+        L = L[0].permute(-1, 0, 1) # take first (and only) in batch
+
+        for d in tqdm(range(L.shape[0])):
+
+            eig_vals, eig_vecs = torch.lobpcg(L[d], k=k, largest=False, method='ortho', tol=atol, niter=niter)
+
+            eig_vecs = torch.real(eig_vecs)
+            eig_vals = torch.real(eig_vals)
+            
             eig_vals[eig_vals > atol] = 1/eig_vals[eig_vals > atol]
             eig_vals[eig_vals < atol] = 0
-            pe  = torch.from_numpy(eig_vecs[:, :k])
-            pe = pe * eig_vals @ pe.T
+            pe = eig_vecs * eig_vals @ eig_vecs.T
 
             res.append(pe.unsqueeze(-1))
-        res = torch.concatenate(res, axis=-1).to(rels.device)
+    res = torch.concatenate(res, axis=-1).to(rels.device)
 
-        return res
+    return res

@@ -5,9 +5,9 @@ dataset:
   root: ~/projects/ULTRA/kg-datasets/
 
 model:
-  class: NBFNet
-  input_dim: 32
-  hidden_dims: [32]
+  class: NBFNetInv
+  input_dim: 64
+  hidden_dims: [64]
   num_mlp_layer: 2
   message_func: distmult
   aggregate_func: sum
@@ -16,7 +16,10 @@ model:
   layer_norm: no
   dependent: no
   copy_weights: yes
-  freeze_relation_weights: no
+  freeze_relation_weights: yes
+  normalization: sym
+  atol: 1e-6
+  
   
 task:
   name: MultiGraphPretraining
@@ -27,7 +30,7 @@ task:
 
 optimizer:
   class: AdamW
-  lr: 5.0e-3
+  lr: 5.0e-4
 
 train:
   gpus: [0]
@@ -36,4 +39,3 @@ train:
   log_interval: 800
   batch_per_epoch: 8000
   fast_test: 500
-  #logger: wandb
