@@ -5,7 +5,7 @@ dataset:
   root: ~/projects/ULTRA/kg-datasets/
 
 model:
-  class: NBFNetDepEig
+  class: NBFNet
   input_dim: 2
   num_mlp_layer: 2
   message_func: distmult

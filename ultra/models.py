@@ -2,10 +2,9 @@ import copy
 import torch
 from tqdm import tqdm
 from torch import nn
-from torch_geometric.utils import get_laplacian, to_dense_adj, add_self_loops, to_scipy_sparse_matrix
+from torch_geometric.utils import get_laplacian, to_dense_adj
 from . import tasks, layers
 from ultra.base_nbfnet import BaseNBFNet, index_to_mask
-from sheaf_theory.model_translator import translate_to_graph_rep_inv, translate_to_graph_rep_eig
 
 class Ultra(nn.Module):
 

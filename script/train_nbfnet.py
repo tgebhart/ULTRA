@@ -17,7 +17,6 @@ from torch_geometric.data import Data
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from ultra import tasks, util
 from ultra.models import NBFNet, NBFNetInv, NBFNetEig, NBFNetDepEig
-from sheaf_theory.model_translator import translate_to_graph_rep_inv
 
 import wandb
 
