@@ -16,7 +16,7 @@ from torch_geometric.data import Data
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from ultra import tasks, util
-from ultra.models import NBFNet, NBFNetInv, NBFNetEig, NBFNetDirect
+from ultra.models import NBFNet, NBFNetInv, NBFNetEig, NBFNetDepEig
 from sheaf_theory.model_translator import translate_to_graph_rep_inv
 
 import wandb
@@ -246,8 +246,9 @@ def get_model(cfg, device, data):
         cfg['model']['hidden_dims'] = [cfg['model']['input_dim']]
         model = NBFNetEig(**cfg.model)
         init_lap = True
-    elif cfg.model['class'] == 'NBFNetDirect':
-        model = NBFNetDirect(**cfg.model)
+    elif cfg.model['class'] == 'NBFNetDepEig':
+        model = NBFNetDepEig(**cfg.model)
+        init_lap = True
     else:
         raise ValueError(f"Unknown model class: {cfg.model}")
     
@@ -323,13 +324,13 @@ if __name__ == "__main__":
 
         logger.warning(separator)
         logger.warning("Evaluate on valid")
-        test(cfg, model, valid_data, filtered_data=filtered_data, device=device)
-        train_and_validate(cfg, model, train_data, valid_data if "fast_test" not in cfg.train else short_valid, filtered_data=filtered_data, batch_per_epoch=cfg.train.batch_per_epoch)
+        test(cfg, model, valid_data, filtered_data=filtered_data, device=device, logger=logger)
+        train_and_validate(cfg, model, train_data, valid_data if "fast_test" not in cfg.train else short_valid, filtered_data=filtered_data, batch_per_epoch=cfg.train.batch_per_epoch, device=device, logger=logger)
         if util.get_rank() == 0:
             logger.warning(separator)
             logger.warning("Evaluate on valid")
-        test(cfg, model, valid_data, filtered_data=filtered_data, dataset='valid', device=device)
+        test(cfg, model, valid_data, filtered_data=filtered_data, dataset='valid', device=device, logger=logger)
         if util.get_rank() == 0:
             logger.warning(separator)
             logger.warning("Evaluate on test")
-        test(cfg, model, test_data, filtered_data=filtered_data, dataset='test', device=device)
+        test(cfg, model, test_data, filtered_data=filtered_data, dataset='test', device=device, logger=logger)

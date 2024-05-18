@@ -5,8 +5,8 @@ dataset:
   root: ~/projects/ULTRA/kg-datasets/
 
 model:
-  class: NBFNetEig
-  input_dim: 128
+  class: NBFNetDepEig
+  input_dim: 2
   num_mlp_layer: 2
   message_func: distmult
   aggregate_func: sum
@@ -15,7 +15,7 @@ model:
   layer_norm: no
   dependent: no
   copy_weights: yes
-  freeze_relation_weights: yes
+  freeze_relation_weights: no
   normalization: sym
   k: 16
   atol: 1.0e-6
@@ -30,7 +30,7 @@ task:
 
 optimizer:
   class: AdamW
-  lr: 5.0e-4
+  lr: 5.0e-3
 
 train:
   gpus: [0]

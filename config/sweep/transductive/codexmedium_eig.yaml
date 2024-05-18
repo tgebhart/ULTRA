@@ -10,7 +10,7 @@ parameters:
   dataset:
     parameters:
       class: 
-        value: CoDExSmall
+        value: CoDExMedium
       root: 
         value: ~/projects/ULTRA/kg-datasets/
 
@@ -19,9 +19,9 @@ parameters:
       class:
         value: NBFNetEig
       input_dim: 
-        values: [128, 256, 512, 1024, 2048, 4096, 8192]
+        values: [4, 8, 16, 32, 64, 128]
       num_mlp_layer:
-        values: [3,4,5]
+        values: [2,3,4]
       message_func:
         value: distmult
       aggregate_func: 
@@ -37,9 +37,9 @@ parameters:
       normalization: 
         value: sym
       k: 
-        values: [32,64,128]
+        values: [4,8,16,32,64,128]
       atol: 
-        values: [1.0e-3, 1.0e-6]
+        values: [1.0e-6]
       niter: 
         values: [16,32,64,128] 
     
@@ -48,7 +48,7 @@ parameters:
       name: 
         value: MultiGraphPretraining
       num_negative: 
-        values: [2,4,8,16,32,64,128]
+        values: [32,64,128]
       strict_negative: 
         value: yes
       adversarial_temperature: 
@@ -61,14 +61,14 @@ parameters:
       class: 
         value: AdamW
       lr: 
-        values: [1.0e-3, 1.0e-4]
+        values: [1.0e-4]
 
   train:
     parameters:
       gpus: 
         value: [0]
       batch_size: 
-        value: 128
+        value: 32
       num_epoch: 
         value: 50
       log_interval:

@@ -1,9 +1,10 @@
+import copy
 import torch
 from tqdm import tqdm
 from torch import nn
 from torch_geometric.utils import get_laplacian, to_dense_adj, add_self_loops, to_scipy_sparse_matrix
 from . import tasks, layers
-from ultra.base_nbfnet import BaseNBFNet
+from ultra.base_nbfnet import BaseNBFNet, index_to_mask
 from sheaf_theory.model_translator import translate_to_graph_rep_inv, translate_to_graph_rep_eig
 
 class Ultra(nn.Module):
@@ -523,34 +524,111 @@ class NBFNetEig(NBFNet):
         return score.view(shape)
 
 
-class NBFNetDirect(NBFNet):
+class NBFNetDepEig(nn.Module):
 
-    def __init__(self, input_dim, hidden_dims, num_relation, message_func="distmult", aggregate_func="sum",
+    def __init__(self, input_dim, num_relation, message_func="distmult", aggregate_func="sum",
                  short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
-                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, **kwargs):
-        super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
-                 short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
-                 dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)        
+                 dependent=True, remove_one_hop=False, num_beam=10, normalization='sym', 
+                  k=16, atol=1e-6, niter=8, copy_weights=True, **kwargs):
+        super().__init__()
         
-
-        feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
-
+        feature_dim = input_dim
+        self.feature_dim = feature_dim
+        self.normalization = normalization
+        self.k = k
+        self.atol = atol
+        self.niter = niter
+        self.copy_weights = copy_weights
+        self.freeze_relation_weights = False
+        self.Leig = None
+        self.dependent = kwargs.get('dependent', False)
         # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
         # each layer has its own learnable relations matrix, so we send the total number of relations, too
         
         self.query = nn.Embedding(num_relation, input_dim)
         if kwargs.get('freeze_relation_weights', False):
             self.query.requires_grad_(False)
-        # self.decoder = nn.parameter.Parameter(torch.empty(feature_dim, feature_dim))
-        # nn.init.xavier_normal_(self.decoder)
+            self.freeze_relation_weights = True
         self.mlp = nn.Sequential()
         mlp = []
         for i in range(num_mlp_layer - 1):
-            mlp.append(nn.Linear(feature_dim, feature_dim))
+            mlp.append(nn.Linear(feature_dim*2, feature_dim*2))
             mlp.append(nn.ReLU())
-        mlp.append(nn.Linear(feature_dim, 1))
+        mlp.append(nn.Linear(feature_dim*2, 1))
         self.mlp = nn.Sequential(*mlp)
+
+    def remove_easy_edges(self, data, h_index, t_index, r_index=None):
+        # we remove training edges (we need to predict them at training time) from the edge index
+        # think of it as a dynamic edge dropout
+        h_index_ext = torch.cat([h_index, t_index], dim=-1)
+        t_index_ext = torch.cat([t_index, h_index], dim=-1)
+        r_index_ext = torch.cat([r_index, r_index + data.num_relations // 2], dim=-1)
+        
+        # we remove existing immediate edges between heads and tails in the batch with the given relation
+        edge_index = torch.cat([data.edge_index, data.edge_type.unsqueeze(0)])
+        # note that here we add relation types r_index_ext to the matching query
+        easy_edge = torch.stack([h_index_ext, t_index_ext, r_index_ext]).flatten(1)
+        index = tasks.edge_match(edge_index, easy_edge)[0]
+        mask = ~index_to_mask(index, data.num_edges)
+
+        data = copy.copy(data)
+        data.edge_index = data.edge_index[:, mask]
+        data.edge_type = data.edge_type[mask]
+        return data
+
+    def negative_sample_to_tail(self, h_index, t_index, r_index, num_direct_rel):
+        # convert p(h | t, r) to p(t' | h', r')
+        # h' = t, r' = r^{-1}, t' = h
+        is_t_neg = (h_index == h_index[:, [0]]).all(dim=-1, keepdim=True)
+        new_h_index = torch.where(is_t_neg, h_index, t_index)
+        new_t_index = torch.where(is_t_neg, t_index, h_index)
+        new_r_index = torch.where(is_t_neg, r_index, r_index + num_direct_rel)
+        return new_h_index, new_t_index, new_r_index
+
+    def translate_to_graph_rep_eig(self, data):
+        
+        rels = torch.ones((data.num_relations, self.feature_dim), device=data.edge_index.device)
+        ret = []
+        for reltype in tqdm(range(data.num_relations)):
+            
+            # now we're assuming the relation representation is a vector, implying 
+            # the associated sheaf Laplacian is the direct sum of the Laplacian in 
+            # each dimension
+            relmsk = (data.edge_type == reltype)
+            rels_reshaped = torch.index_select(rels, 0, data.edge_type[relmsk])
+            
+            L_edge_index, L_edge_weight = get_laplacian(data.edge_index[:,relmsk], edge_weight=rels_reshaped, 
+                                                        normalization=self.normalization)
+
+            res = []
+            
+            L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight, max_num_nodes=data.num_nodes)
+            L = L[0].permute(-1, 0, 1) # take first (and only) in batch
+
+            for d in range(L.shape[0]):
+
+                eig_vals, eig_vecs = torch.lobpcg(L[d], k=self.k, 
+                                                largest=False, method='ortho',
+                                                tol=self.atol, niter=self.niter)
+
+                eig_vecs = torch.real(eig_vecs)
+                eig_vals = torch.real(eig_vals)
+                
+                eig_vals[eig_vals > self.atol] = 1/eig_vals[eig_vals > self.atol]
+                eig_vals[eig_vals < self.atol] = 0
+                pe = eig_vecs * eig_vals @ eig_vecs.T
+
+                res.append(pe.unsqueeze(-1))
+            res = torch.concatenate(res, axis=-1)
+            ret.append(res.unsqueeze(0))
+        ret = torch.concatenate(ret, axis=0).to(rels.device)
+        return ret
     
+    def init_lap(self, data):
+        with torch.no_grad():
+            self.Leig = self.translate_to_graph_rep_eig(data)
+        if not self.freeze_relation_weights:
+            self.Leig.requires_grad = True
 
     def forward(self, data, batch):
         h_index, t_index, r_index = batch.unbind(-1)
@@ -565,39 +643,9 @@ class NBFNetDirect(NBFNet):
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index, num_direct_rel=data.num_relations // 2)
         assert (h_index[:, [0]] == h_index).all()
         assert (r_index[:, [0]] == r_index).all()
-        
-        res = []
-        nbf_layers = [self.layers[0]]
-        for layer in nbf_layers:
-            if hasattr(layer, 'relation_linear'):
-                rels = layer.relation_linear(data).weight
-            elif hasattr(layer, 'relation'):
-                rels = layer.relation.weight
-            else:
-                raise ValueError('Cannot find relation representation in layer.')
 
-            # now we're assuming the relation representation is a vector, implying 
-            # the associated sheaf Laplacian is the direct sum of the Laplacian in 
-            # each dimension
-            
-            rels_reshaped = torch.index_select(rels, 0, data.edge_type)
-            L_edge_index, L_edge_weight = get_laplacian(data.edge_index, edge_weight=rels_reshaped, normalization='sym')
-            L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight, max_num_nodes=data.num_nodes)
-            L = L[0].permute(-1, 0, 1)
-            I = torch.eye(data.num_nodes).to(L.device).unsqueeze(0)
-            Linv = L
-            for i in range(2,3):
-                Linv += torch.linalg.matrix_power(I - L, i)
-
-            # eigs, vecs = torch.lobpcg(L.permute(-1, 0, 1), k=3, largest=True, tol=1e-6)
-
-            # TODO: This does not converge
-            # perturbation = torch.randn(*L.shape, device=L.device) * 1e-6  # Small random noise
-            # Linv = torch.linalg.pinv((L+perturbation).permute(-1, 0, 1)).permute(1, 2, 0)
-            
         # message passing and updated node representations
-        Linv = Linv.permute(1, 2, 0)
-        feature = torch.index_select(Linv, 0, h_index[:,0])
+        feature = self.Leig[r_index[:,0], h_index[:,0]]
         query = torch.index_select(self.query.weight, 0, r_index[:,0])
         query = query.unsqueeze(1).expand((-1, feature.shape[1], -1))
         
