@@ -15,7 +15,6 @@ model:
   copy_weights: no
   freeze_relation_weights: yes
   dependent: no
-  orthogonal: false
   
 task:
   name: MultiGraphPretraining

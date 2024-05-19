@@ -655,3 +655,115 @@ class NBFNetDepEig(nn.Module):
 
         score = self.mlp(feature).squeeze(-1)
         return score.view(shape)
+    
+
+class NTNEig(NBFNet):
+
+    def __init__(self, input_dim, hidden_dims, num_relation, message_func="distmult", aggregate_func="sum",
+                 short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
+                 dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, normalization='sym', 
+                  k=16, atol=1e-6, niter=8, copy_weights=True, **kwargs):
+        super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
+                 short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
+                 dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)        
+        
+
+        feature_dim = (sum(hidden_dims) if concat_hidden else hidden_dims[-1]) + input_dim
+
+        self.normalization = normalization
+        self.k = k
+        self.atol = atol
+        self.niter = niter
+        self.copy_weights = copy_weights
+        self.freeze_relation_weights = False
+        self.Leig = None
+        # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
+        # each layer has its own learnable relations matrix, so we send the total number of relations, too
+        
+        self.query = nn.Embedding(num_relation, input_dim)
+        if kwargs.get('freeze_relation_weights', False):
+            self.query.requires_grad_(False)
+            self.freeze_relation_weights = True
+        self.mlp = nn.Sequential()
+        mlp = []
+        for i in range(num_mlp_layer - 1):
+            mlp.append(nn.Linear(feature_dim, feature_dim))
+            mlp.append(nn.ReLU())
+        mlp.append(nn.Linear(feature_dim, 1))
+        self.mlp = nn.Sequential(*mlp)
+
+    def translate_to_graph_rep_eig(self, data):
+        nbf_layers = self.layers
+        if self.copy_weights:
+            nbf_layers = [nbf_layers[0]]
+        for layer in nbf_layers:
+            if hasattr(layer, 'relation_linear'):
+                rels = layer.relation_linear(data).weight
+            elif hasattr(layer, 'relation'):
+                rels = layer.relation.weight
+            else:
+                raise ValueError('Cannot find relation representation in layer.')
+
+            # now we're assuming the relation representation is a vector, implying 
+            # the associated sheaf Laplacian is the direct sum of the Laplacian in 
+            # each dimension
+            rels_reshaped = torch.index_select(rels, 0, data.edge_type)
+
+            L_edge_index, L_edge_weight = get_laplacian(data.edge_index, edge_weight=rels_reshaped, 
+                                                        normalization=self.normalization)
+
+            res = []
+            
+            L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight, max_num_nodes=data.num_nodes)
+            L = L[0].permute(-1, 0, 1) # take first (and only) in batch
+
+            for d in tqdm(range(L.shape[0])):
+
+                eig_vals, eig_vecs = torch.lobpcg(L[d], k=self.k, 
+                                                largest=False, method='ortho',
+                                                tol=self.atol, niter=self.niter)
+
+                eig_vecs = torch.real(eig_vecs)
+                eig_vals = torch.real(eig_vals)
+                
+                eig_vals[eig_vals > self.atol] = 1/eig_vals[eig_vals > self.atol]
+                eig_vals[eig_vals < self.atol] = 0
+                pe = eig_vecs * eig_vals @ eig_vecs.T
+
+                res.append(pe.unsqueeze(-1))
+        res = torch.concatenate(res, axis=-1).to(rels.device)
+
+        return res
+    
+    def init_lap(self, data):
+        with torch.no_grad():
+            self.Leig = self.translate_to_graph_rep_eig(data)
+        if not self.freeze_relation_weights:
+            self.Leig.requires_grad = True
+
+    def forward(self, data, batch):
+        h_index, t_index, r_index = batch.unbind(-1)
+        if self.training:
+            # Edge dropout in the training mode
+            # here we want to remove immediate edges (head, relation, tail) from the edge_index and edge_types
+            # to make NBFNet iteration learn non-trivial paths
+            data = self.remove_easy_edges(data, h_index, t_index, r_index)
+
+        shape = h_index.shape
+        # turn all triples in a batch into a tail prediction mode
+        h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index, num_direct_rel=data.num_relations // 2)
+        assert (h_index[:, [0]] == h_index).all()
+        assert (r_index[:, [0]] == r_index).all()
+
+        # message passing and updated node representations
+        feature = torch.index_select(self.Leig, 0, h_index[:,0])
+        query = torch.index_select(self.query.weight, 0, r_index[:,0])
+        query = query.unsqueeze(1).expand((-1, feature.shape[1], -1))
+        
+        feature = torch.cat([feature, query], dim=-1)
+        index = t_index.unsqueeze(-1).expand(-1, -1, feature.shape[-1])
+        # extract representations of tail entities from the updated node states
+        feature = feature.gather(1, index)  # (batch_size, num_negative + 1, feature_dim)
+
+        score = self.mlp(feature).squeeze(-1)
+        return score.view(shape)

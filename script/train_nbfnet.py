@@ -16,7 +16,7 @@ from torch_geometric.data import Data
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from ultra import tasks, util
-from ultra.models import NBFNet, NBFNetInv, NBFNetEig, NBFNetDepEig
+from ultra.models import NBFNet, NBFNetInv, NBFNetEig, NBFNetDepEig, NTNEig
 
 import wandb
 
@@ -247,6 +247,9 @@ def get_model(cfg, device, data):
         init_lap = True
     elif cfg.model['class'] == 'NBFNetDepEig':
         model = NBFNetDepEig(**cfg.model)
+        init_lap = True
+    elif cfg.model['class'] == 'NTNEig':
+        model = NTNEig(**cfg.model)
         init_lap = True
     else:
         raise ValueError(f"Unknown model class: {cfg.model}")
