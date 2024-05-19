@@ -5,9 +5,9 @@ dataset:
   root: ~/projects/ULTRA/kg-datasets/
 
 model:
-  class: NBFNet
-  input_dim: 2
-  num_mlp_layer: 2
+  class: NBFNetEig
+  input_dim: 40
+  num_mlp_layer: 3
   message_func: distmult
   aggregate_func: sum
   activation: no
@@ -15,15 +15,16 @@ model:
   layer_norm: no
   dependent: no
   copy_weights: yes
-  freeze_relation_weights: no
+  freeze_relation_weights: yes
+  inv_device: cpu
   normalization: sym
   k: 16
   atol: 1.0e-6
-  niter: 8 
+  niter: 8
   
 task:
   name: MultiGraphPretraining
-  num_negative: 512
+  num_negative: 128
   strict_negative: yes
   adversarial_temperature: 1
   metric: [mr, mrr, hits@1, hits@3, hits@10]
@@ -35,7 +36,7 @@ optimizer:
 train:
   gpus: [0]
   batch_size: 128
-  num_epoch: 100
+  num_epoch: 50
   log_interval: 800
   batch_per_epoch: 8000
   fast_test: 500

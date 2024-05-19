@@ -19,7 +19,7 @@ parameters:
       class:
         value: NBFNetEig
       input_dim: 
-        values: [128, 256, 512, 1024, 2048, 4096, 8192]
+        values: [2048, 4096, 8192, 16384, 32768]
       num_mlp_layer:
         values: [3,4,5]
       message_func:
@@ -34,14 +34,16 @@ parameters:
         value: yes
       freeze_relation_weights: 
         value: yes
+      inv_device: 
+        value: cpu
       normalization: 
         value: sym
       k: 
         values: [32,64,128]
       atol: 
-        values: [1.0e-3, 1.0e-6]
+        values: [1.0e-6]
       niter: 
-        values: [16,32,64,128] 
+        values: [64,128,256]
     
   task:
     parameters:
@@ -61,7 +63,7 @@ parameters:
       class: 
         value: AdamW
       lr: 
-        values: [1.0e-3, 1.0e-4]
+        values: [1.0e-4]
 
   train:
     parameters:
@@ -70,7 +72,7 @@ parameters:
       batch_size: 
         value: 128
       num_epoch: 
-        value: 50
+        value: 100
       log_interval:
         value: 800
       batch_per_epoch: 

@@ -414,7 +414,7 @@ class NBFNetEig(NBFNet):
     def __init__(self, input_dim, hidden_dims, num_relation, message_func="distmult", aggregate_func="sum",
                  short_cut=False, layer_norm=False, activation="relu", concat_hidden=False, num_mlp_layer=2,
                  dependent=True, remove_one_hop=False, num_beam=10, path_topk=10, normalization='sym', 
-                  k=16, atol=1e-6, niter=8, copy_weights=True, **kwargs):
+                  k=16, atol=1e-6, niter=8, copy_weights=True, inv_device='cpu', **kwargs):
         super().__init__(input_dim, hidden_dims, num_relation, message_func=message_func, aggregate_func=aggregate_func,
                  short_cut=short_cut, layer_norm=layer_norm, activation=activation, concat_hidden=concat_hidden, num_mlp_layer=num_mlp_layer,
                  dependent=dependent, remove_one_hop=remove_one_hop, num_beam=num_beam, path_topk=path_topk, **kwargs)        
@@ -429,6 +429,7 @@ class NBFNetEig(NBFNet):
         self.copy_weights = copy_weights
         self.freeze_relation_weights = False
         self.Leig = None
+        self.inv_device = torch.device(inv_device)
         # additional relation embedding which serves as an initial 'query' for the NBFNet forward pass
         # each layer has its own learnable relations matrix, so we send the total number of relations, too
         
@@ -460,20 +461,19 @@ class NBFNetEig(NBFNet):
             # the associated sheaf Laplacian is the direct sum of the Laplacian in 
             # each dimension
             rels_reshaped = torch.index_select(rels, 0, data.edge_type)
-            I = torch.eye(data.num_nodes).to(rels.device)
-            I = I.unsqueeze(-1).repeat(1,1,rels_reshaped.shape[1])
-
             L_edge_index, L_edge_weight = get_laplacian(data.edge_index, edge_weight=rels_reshaped, 
                                                         normalization=self.normalization)
 
             res = []
-            
-            L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight, max_num_nodes=data.num_nodes)
-            L = L[0].permute(-1, 0, 1) # take first (and only) in batch
-
-            for d in tqdm(range(L.shape[0])):
-
-                eig_vals, eig_vecs = torch.lobpcg(L[d], k=self.k, 
+            for d in tqdm(range(L_edge_weight.shape[1])):
+                # L = to_dense_adj(L_edge_index, edge_attr=L_edge_weight[:,d], max_num_nodes=data.num_nodes)
+                # L = L[0] # take first (and only) in batch
+                # eig_vals, eig_vecs = torch.lobpcg(L, k=self.k, 
+                #                                 largest=False, method='ortho',
+                #                                 tol=self.atol, niter=self.niter)
+                L = torch.sparse_coo_tensor(L_edge_index, L_edge_weight[:,d], 
+                                            (data.num_nodes, data.num_nodes))
+                eig_vals, eig_vecs = torch.lobpcg(L, k=self.k, 
                                                 largest=False, method='ortho',
                                                 tol=self.atol, niter=self.niter)
 
@@ -484,8 +484,8 @@ class NBFNetEig(NBFNet):
                 eig_vals[eig_vals < self.atol] = 0
                 pe = eig_vecs * eig_vals @ eig_vecs.T
 
-                res.append(pe.unsqueeze(-1))
-        res = torch.concatenate(res, axis=-1).to(rels.device)
+                res.append(pe.unsqueeze(-1).to(self.inv_device))
+        res = torch.concatenate(res, axis=-1)
 
         return res
     
@@ -510,7 +510,10 @@ class NBFNetEig(NBFNet):
         assert (r_index[:, [0]] == r_index).all()
 
         # message passing and updated node representations
-        feature = torch.index_select(self.Leig, 0, h_index[:,0])
+        if self.inv_device != h_index.device:
+            feature = torch.index_select(self.Leig, 0, h_index[:,0].to(self.inv_device)).to(r_index.device)
+        else:
+            feature = torch.index_select(self.Leig, 0, h_index[:,0])
         query = torch.index_select(self.query.weight, 0, r_index[:,0])
         query = query.unsqueeze(1).expand((-1, feature.shape[1], -1))
         
