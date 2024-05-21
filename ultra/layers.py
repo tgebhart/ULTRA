@@ -73,9 +73,6 @@ class GeneralizedRelationalConv(MessagePassing):
                     self.relation = OrthogonalMatrices(num_relation, input_dim)
                     # Apply orthogonal parameterization to each matrix slice
                     self.relation = nn.utils.parametrizations.orthogonal(self.relation)
-                    # self.relation = nn.Parameter(torch.randn(num_relation, input_dim, input_dim))
-                    # nn.init.uniform_(self.relation, a=0, b=1)
-                    # self.relation = nn.utils.parametrizations.orthogonal(self.relation)
                 else:
                     # relation embeddings as an independent embedding matrix per each layer
                     self.relation = nn.Embedding(num_relation, input_dim)

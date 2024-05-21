@@ -1,15 +1,15 @@
 output_dir: ~/projects/ULTRA/output
 
 dataset:
-  class: CoDExMedium
+  class: CoDExSmall
   root: ~/projects/ULTRA/kg-datasets/
 
 model:
   class: NBFNetEig
-  input_dim: 40
-  num_mlp_layer: 3
+  input_dim: 64
+  num_mlp_layer: 2
   message_func: distmult
-  aggregate_func: sum
+  aggregate_func: pna
   activation: no
   short_cut: no
   layer_norm: no
@@ -18,7 +18,7 @@ model:
   freeze_relation_weights: yes
   inv_device: cpu
   normalization: sym
-  k: 16
+  k: 32
   atol: 1.0e-6
   niter: 128
   

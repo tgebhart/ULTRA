@@ -9,12 +9,12 @@ model:
   input_dim: 8
   hidden_dims: [8, 8, 8]
   message_func: ntn
-  aggregate_func: sum
+  aggregate_func: pna
   short_cut: no
   layer_norm: no
   copy_weights: no
-  freeze_relation_weights: yes
-  dependent: no
+  freeze_relation_weights: no
+  dependent: yes
   
 task:
   name: MultiGraphPretraining

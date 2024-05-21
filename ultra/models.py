@@ -434,9 +434,10 @@ class NBFNetEig(NBFNet):
         # each layer has its own learnable relations matrix, so we send the total number of relations, too
         
         self.query = nn.Embedding(num_relation, input_dim)
-        if kwargs.get('freeze_relation_weights', False):
+        if kwargs.get('freeze_query_weights', False):
+            self.freeze_query_weights = True
             self.query.requires_grad_(False)
-            self.freeze_relation_weights = True
+            
         self.mlp = nn.Sequential()
         mlp = []
         for i in range(num_mlp_layer - 1):
