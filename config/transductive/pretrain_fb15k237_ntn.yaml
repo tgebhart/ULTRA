@@ -18,7 +18,7 @@ model:
   
 task:
   name: MultiGraphPretraining
-  num_negative: 128
+  num_negative: 64
   strict_negative: yes
   adversarial_temperature: 1
   metric: [mr, mrr, hits@1, hits@3, hits@10]
@@ -29,7 +29,7 @@ optimizer:
 
 train:
   gpus: [0,1,2,3]
-  batch_size: 32
+  batch_size: 4
   num_epoch: 20
   log_interval: 800
   batch_per_epoch: 8000
