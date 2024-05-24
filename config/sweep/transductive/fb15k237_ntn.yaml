@@ -1,0 +1,71 @@
+program: script/sweep_nbfnet.py
+method: grid
+metric:
+  goal: maximize
+  name: valid_mrr
+parameters:
+  seed: 
+    value: 1024
+
+  dataset:
+    parameters:
+      class: 
+        value: FB15k237
+      root: 
+        value: ~/projects/ULTRA/kg-datasets/
+
+  model:
+    parameters:
+      class:
+        value: NBFNet
+      input_dim: 
+        values: [4,8,16,32]
+      num_mlp_layer:
+        values: [2,3]
+      message_func:
+        value: ntn
+      aggregate_func: 
+        values: [pna, sum]
+      dependent: 
+        value: yes
+      copy_weights: 
+        value: no
+      freeze_relation_weights: 
+        value: no
+      orthogonal:
+        values: [yes, no]
+    
+  task:
+    parameters:
+      name: 
+        value: MultiGraphPretraining
+      num_negative: 
+        values: [32,64,128,256]
+      strict_negative: 
+        value: yes
+      adversarial_temperature: 
+        value: 1
+      metric: 
+        value: [mrr]
+
+  optimizer:
+    parameters:
+      class: 
+        value: AdamW
+      lr: 
+        values: [1.0e-3,1.0e-4]
+
+  train:
+    parameters:
+      gpus: 
+        value: [0,1,2,3]
+      batch_size: 
+        value: 32
+      num_epoch: 
+        value: 20
+      log_interval:
+        value: 800
+      batch_per_epoch: 
+        value: 8000
+      fast_test: 
+        value: 500

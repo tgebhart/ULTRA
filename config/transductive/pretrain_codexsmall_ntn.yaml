@@ -6,31 +6,32 @@ dataset:
 
 model:
   class: NBFNet
-  input_dim: 32
-  hidden_dims: [32, 32, 32]
+  input_dim: 8
+  hidden_dims: [8, 8, 8, 8, 8, 8]
   message_func: ntn
   aggregate_func: pna
   short_cut: no
   layer_norm: no
   copy_weights: no
   freeze_relation_weights: no
+  orthogonal: no
   dependent: yes
   
 task:
   name: MultiGraphPretraining
-  num_negative: 128
+  num_negative: 64
   strict_negative: yes
   adversarial_temperature: 1
   metric: [mr, mrr, hits@1, hits@3, hits@10]
 
 optimizer:
   class: AdamW
-  lr: 5.0e-3
+  lr: 5.0e-4
 
 train:
   gpus: [0]
   batch_size: 32
-  num_epoch: 25
+  num_epoch: 20
   log_interval: 800
   batch_per_epoch: 8000
   fast_test: 500
