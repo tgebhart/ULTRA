@@ -35,7 +35,8 @@ class GeneralizedRelationalConv(MessagePassing):
     # propagate_type = {"edge_index": torch.LongTensor, "size": Tuple[int, int]}
 
     def __init__(self, input_dim, output_dim, num_relation, query_input_dim, message_func="distmult",
-                 aggregate_func="pna", layer_norm=False, activation="relu", dependent=False, project_relations=False):
+                 aggregate_func="pna", layer_norm=False, activation="relu", dependent=False, project_relations=False,
+                 orthogonal=False):
         super(GeneralizedRelationalConv, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -72,7 +73,8 @@ class GeneralizedRelationalConv(MessagePassing):
                     # obtain relation embeddings as an independent embedding matrix per each layer
                     self.relation = OrthogonalMatrices(num_relation, input_dim)
                     # Apply orthogonal parameterization to each matrix slice
-                    self.relation = nn.utils.parametrizations.orthogonal(self.relation)
+                    if orthogonal:
+                        self.relation = nn.utils.parametrizations.orthogonal(self.relation)
                 else:
                     # relation embeddings as an independent embedding matrix per each layer
                     self.relation = nn.Embedding(num_relation, input_dim)

@@ -6,14 +6,15 @@ dataset:
 
 model:
   class: NBFNet
-  input_dim: 16
-  hidden_dims: [16, 16, 16, 16, 16, 16]
+  input_dim: 8
+  hidden_dims: [8, 8, 8, 8, 8, 8]
   message_func: ntn
   aggregate_func: pna
   short_cut: no
   layer_norm: no
   copy_weights: no
   freeze_relation_weights: no
+  orthogonal: no
   dependent: yes
   
 task:
@@ -29,7 +30,7 @@ optimizer:
 
 train:
   gpus: [0,1,2,3]
-  batch_size: 8
+  batch_size: 32
   num_epoch: 20
   log_interval: 800
   batch_per_epoch: 8000

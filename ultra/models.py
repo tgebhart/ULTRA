@@ -222,6 +222,7 @@ class NBFNet(BaseNBFNet):
         self.layers = nn.ModuleList()
         self.copy_weights = kwargs.get('copy_weights', False)
         self.freeze_relation_weights = kwargs.get('freeze_relation_weights', False)
+        self.orthogonal = kwargs.get('orthogonal', False)
 
         for i in range(len(self.dims) - 1):
             if self.copy_weights:
@@ -229,12 +230,12 @@ class NBFNet(BaseNBFNet):
                 if i == 0:
                     l0 = layers.GeneralizedRelationalConv(self.dims[i], self.dims[i + 1], num_relation,
                                                                 self.dims[0], message_func, aggregate_func, layer_norm,
-                                                                activation, dependent)
+                                                                activation, dependent, orthogonal=self.orthogonal)
                 layer = l0
             else:
                 layer = layers.GeneralizedRelationalConv(self.dims[i], self.dims[i + 1], num_relation,
                                                                 self.dims[0], message_func, aggregate_func, layer_norm,
-                                                                activation, dependent)
+                                                                activation, dependent, orthogonal=self.orthogonal)
             if self.freeze_relation_weights:
                 for param in layer.parameters():
                     param.requires_grad = False    
