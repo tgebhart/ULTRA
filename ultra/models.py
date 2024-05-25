@@ -224,6 +224,8 @@ class NBFNet(BaseNBFNet):
         self.freeze_relation_weights = kwargs.get('freeze_relation_weights', False)
         self.orthogonal = kwargs.get('orthogonal', False)
 
+        hidden_dims = [input_dim]*(hidden_dims) if isinstance(hidden_dims, int) else hidden_dims
+
         for i in range(len(self.dims) - 1):
             if self.copy_weights:
                 print('COPYING WEIGHTS...')

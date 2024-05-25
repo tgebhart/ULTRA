@@ -15,10 +15,10 @@ class BaseNBFNet(nn.Module):
                  dependent=False, remove_one_hop=False, num_beam=10, path_topk=10, **kwargs):
         super(BaseNBFNet, self).__init__()
 
-        if not isinstance(hidden_dims, Sequence):
-            hidden_dims = [hidden_dims]
+        # if not isinstance(hidden_dims, Sequence):
+        #     hidden_dims = [hidden_dims]
 
-        self.dims = [input_dim] + hidden_dims if isinstance(hidden_dims, list) else [input_dim]*hidden_dims
+        self.dims = [input_dim]*(hidden_dims+1) if isinstance(hidden_dims, int) else [input_dim] + hidden_dims
         self.num_relation = num_relation
         self.short_cut = short_cut  # whether to use residual connections between GNN layers
         self.concat_hidden = concat_hidden  # whether to compute final states as a function of all layer outputs or last
