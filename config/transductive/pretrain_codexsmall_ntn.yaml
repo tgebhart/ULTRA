@@ -7,7 +7,7 @@ dataset:
 model:
   class: NBFNet
   input_dim: 8
-  hidden_dims: 6
+  hidden_dims: 10
   message_func: ntn
   aggregate_func: pna
   short_cut: no
