@@ -6,7 +6,7 @@ dataset:
 
 model:
   class: NBFNetEig
-  input_dim: 64
+  input_dim: 32
   num_mlp_layer: 2
   message_func: distmult
   aggregate_func: pna
@@ -18,20 +18,20 @@ model:
   freeze_relation_weights: yes
   inv_device: cpu
   normalization: sym
-  k: 32
-  atol: 1.0e-6
-  niter: 128
+  k: 64
+  atol: 1.0e-3
+  niter: 64
   
 task:
   name: MultiGraphPretraining
-  num_negative: 128
+  num_negative: 1024
   strict_negative: yes
   adversarial_temperature: 1
   metric: [mr, mrr, hits@1, hits@3, hits@10]
 
 optimizer:
   class: AdamW
-  lr: 5.0e-3
+  lr: 1.0e-3
 
 train:
   gpus: [0]
