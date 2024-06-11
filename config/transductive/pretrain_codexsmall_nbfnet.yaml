@@ -8,7 +8,7 @@ model:
   class: NBFNet
   input_dim: 32
   hidden_dims: 3
-  message_func: ntn
+  message_func: distmult
   aggregate_func: pna
   short_cut: no
   layer_norm: no
